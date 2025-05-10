@@ -45,14 +45,14 @@ class InitializationState(GameState):
             return
         logger.info(f"正在处理 {type(self).__name__}...")
         # 目前实现策略是人工点击“开始冒险”按钮
-        next_state = MapSelectionState() # 初始为地图选择状态
+        # next_state = MapSelectionState() # 初始为地图选择状态
         # next_state = FairyBlessingState() # 初始为仙女祝福状态
         # next_state = CombatState() # 初始为战斗状态
         # next_state = ShopState() # 初始为商店状态
         # next_state = TavernState() # 初始为酒馆状态
         # next_state = BlacksmithState() # 初始为铁匠铺状态
         # next_state = ChestState() # 初始为宝箱状态
-        # next_state = DialogueRewardState() # 初始为对话奖励状态
+        next_state = DialogueRewardState() # 初始为对话奖励状态
         # next_state = SkillAvailableState() # 初始为技能可用状态
         # next_state = UpgradeState() # 初始为升级状态
         self.context.transition_to(next_state)

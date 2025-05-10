@@ -559,7 +559,7 @@ class CombatState(GameState):
             logger.info("  -> 检测到敌人 HP 为 0，战斗胜利！")
             time.sleep(1.5) # 等待胜利动画或结算
 
-            self.context.add_to_history("system", "系统提示：战斗已胜利结束。")
+            self.context.add_to_history("map","system", "系统提示：战斗已胜利结束。")
 
             # 检查是否进入对话状态
             dialogue_text, _ = self.context.recognize_text_in_relative_roi(DIALOGUE_INDICATOR_ROI, "dialogue_check")
