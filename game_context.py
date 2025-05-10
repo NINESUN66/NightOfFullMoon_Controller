@@ -61,6 +61,7 @@ class GameContext:
         self._last_selected_node: Optional[Any] = None # 上一个选择的节点信息
         self.screen_width: Optional[int] = None
         self.screen_height: Optional[int] = None
+        self.combat_wins: int = 0 # 战斗胜利次数
         self.input_simulator.set_context(self)
         self._fetch_and_store_screen_dimensions()
         self.game_knowledge = self._load_knowledge(knowledge_file)
@@ -146,6 +147,15 @@ class GameContext:
         # if isinstance(new_state, CombatState):
         #     logger.info("  -> 进入 CombatState，清空战斗历史。")
         #     self.clear_history('combat')
+
+    def increment_combat_wins(self):
+        """增加战斗胜利次数。"""
+        self.combat_wins += 1
+        logger.info(f"战斗胜利次数增加到 {self.combat_wins}。")
+
+    def get_combat_wins_time(self) -> int:
+        """获取战斗胜利次数。"""
+        return self.combat_wins
 
     def request(self):
         """

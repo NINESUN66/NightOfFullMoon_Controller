@@ -298,4 +298,19 @@ class MapSelectionState(GameState):
         调用新的动态处理逻辑。
         """
         # 调用新的私有方法来处理
+        # 判断是否需要使用技能
+        if not self.context:
+            logger.error(f"{type(self).__name__} 未设置上下文。")
+            return
+        
+        combat_wins = self.context.get_combat_wins_time()
+        skill_check_key = f"skill_attempted_for_wins_{combat_wins}"
+        if combat_wins > 0 and combat_wins % 5 == 0 and \
+           not self.context.get_shared_data(skill_check_key, False):
+            logger.info(f"  -> 战斗胜利 {combat_wins} 次，检测到需要使用技能，且基于此胜利次数尚未尝试。")
+            self.context.update_shared_data(skill_check_key, True)
+            from .skill import SkillAvailableState
+            next_state = SkillAvailableState()
+            self.context.transition_to(next_state)
+            return
         self._handle_dynamic_map_selection()

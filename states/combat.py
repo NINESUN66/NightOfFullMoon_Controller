@@ -45,20 +45,35 @@ class CombatState(GameState):
             return False
         return all(abs(c1 - c2) <= tolerance for c1, c2 in zip(color1, color2))
 
+    def _get_card_cost_from_knowledgebase(self, card_name: str, default_cost: int = 0) -> int:
+        """尝试从知识库获取卡牌费用，如果找不到则返回默认费用。"""
+        if self.context and self.context.game_knowledge:
+            card_data = self.context.game_knowledge.get('cards', {}).get(card_name)
+            if card_data and 'cost' in card_data and isinstance(card_data['cost'], int):
+                kb_cost = card_data['cost']
+                logger.info(f"  -> 从知识库找到卡牌 '{card_name}' 的费用: {kb_cost}")
+                return kb_cost
+            else:
+                logger.warning(f"  -> 未在知识库中找到卡牌 '{card_name}' 的有效费用信息，将使用默认值 {default_cost}。")
+        else:
+            logger.warning(f"  -> 无法访问知识库来获取卡牌 '{card_name}' 的费用，将使用默认值 {default_cost}。")
+        return default_cost
+
+
     def _recognize_hand(self) -> List[Dict]:
         """
         识别手牌信息 (新方法：OCR 红框区域并解析)。
         识别红框区域内的文本，中文认为是卡牌名，数字认为是前一张卡牌的费用。
+        如果OCR未找到费用，则尝试从知识库获取。
         """
         if not self.context: return []
         hand_cards = []
         logger.info("  -> 开始识别手牌 (红框 OCR 法)...")
 
         # 1. 对红框区域进行 OCR，获取带索引的文本块数组
-        # 返回值是 List[Tuple[int, str]]
         _, recognized_blocks = self.context.recognize_text_in_relative_roi(
             HAND_TEXT_ROI,
-            "images/debug_hand_text_area.png" # 使用正斜杠或双反斜杠
+            "images/debug_hand_text_area.png"
         )
 
         if not recognized_blocks:
@@ -67,68 +82,64 @@ class CombatState(GameState):
 
         logger.debug(f"  -> 手牌区域 OCR 原始结果: {recognized_blocks}")
 
-        # 2. 解析文本块，尝试匹配卡牌名和费用
         current_card_name = None
-        # 按索引排序（虽然返回时应该已经有序，但以防万一）
         recognized_blocks.sort(key=lambda block: block[0])
-
-        card_index_counter = 0 # 用于给手牌分配索引
+        card_index_counter = 0
 
         for block in recognized_blocks:
-            # block 是 (index, text)
-            text = block[1].strip() # <--- 修复：使用 block[1] 获取文本
-            # coords = block[1] # <--- 移除：block[1] 不是坐标
+            text = block[1].strip()
 
             if not text:
                 continue
 
-            # 尝试判断是中文名还是数字费用
             is_chinese_name = bool(re.search(r'[\u4e00-\u9fff]', text))
             is_numeric_cost = text.isdigit()
 
             if is_chinese_name:
-                # 如果之前有未匹配费用的卡牌名，记录下来（假设费用为0）
                 if current_card_name:
-                    logger.warning(f"  -> 卡牌 '{current_card_name}' 后面直接跟了另一个中文名 '{text}'，未找到费用，假设为0。")
-                    # estimated_roi = current_card_coords if current_card_coords else (0,0,0,0) # <--- 移除 ROI
-                    hand_cards.append({"name": current_card_name, "cost": 0, "index": card_index_counter}) # <--- 添加 index
+                    logger.warning(f"  -> 卡牌 '{current_card_name}' 后面直接跟了另一个中文名 '{text}'，未找到OCR费用。")
+                    cost = self._get_card_cost_from_knowledgebase(current_card_name)
+                    hand_cards.append({"name": current_card_name, "cost": cost, "index": card_index_counter})
                     card_index_counter += 1
-
-                # 记录新的卡牌名，等待费用
                 current_card_name = text
-                # current_card_coords = coords # <--- 移除
-                logger.debug(f"    识别到可能的卡牌名: '{current_card_name}'") # 移除坐标信息
+                logger.debug(f"    识别到可能的卡牌名: '{current_card_name}'")
 
             elif is_numeric_cost and current_card_name:
-                # 如果当前有等待费用的卡牌名，并且识别到数字
                 try:
                     cost = int(text)
                     if 0 <= cost <= 10: # 合理费用范围
-                        logger.debug(f"    识别到卡牌 '{current_card_name}' 的费用: {cost}") # 移除坐标信息
-                        # estimated_roi = current_card_coords if current_card_coords else coords # <--- 移除 ROI
-                        hand_cards.append({"name": current_card_name, "cost": cost, "index": card_index_counter}) # <--- 添加 index
+                        logger.debug(f"    识别到卡牌 '{current_card_name}' 的OCR费用: {cost}")
+                        hand_cards.append({"name": current_card_name, "cost": cost, "index": card_index_counter})
                         card_index_counter += 1
-                        current_card_name = None # 重置，等待下一个卡牌名
-                        # current_card_coords = None # <--- 移除
+                        current_card_name = None
                     else:
-                        logger.warning(f"  -> 识别到数字 '{text}'，但在卡牌 '{current_card_name}' 后面，且不在合理费用范围 (0-10)，忽略。") # 移除坐标信息
+                        logger.warning(f"  -> 识别到数字 '{text}'，但在卡牌 '{current_card_name}' 后面，且不在合理费用范围 (0-10)。尝试从知识库获取费用。")
+                        cost_kb = self._get_card_cost_from_knowledgebase(current_card_name)
+                        hand_cards.append({"name": current_card_name, "cost": cost_kb, "index": card_index_counter})
+                        card_index_counter += 1
+                        current_card_name = None # 无论如何，这个卡牌名处理完毕
                 except ValueError:
-                    pass # 不应发生
+                    logger.error(f"  -> 文本 '{text}' 判断为数字但无法转换为整数。")
+                    if current_card_name: # 如果前面有卡牌名，尝试从知识库获取
+                        logger.warning(f"  -> 因 '{text}' 转换失败，尝试为 '{current_card_name}' 从知识库获取费用。")
+                        cost_kb = self._get_card_cost_from_knowledgebase(current_card_name)
+                        hand_cards.append({"name": current_card_name, "cost": cost_kb, "index": card_index_counter})
+                        card_index_counter += 1
+                        current_card_name = None
+
+
             elif is_numeric_cost and not current_card_name:
-                 logger.warning(f"  -> 识别到数字 '{text}'，但前面没有等待费用的卡牌名，忽略。") # 移除坐标信息
-            # else:
-            #      logger.debug(f"    忽略非中文非数字文本块: '{text}'") # 移除坐标信息
+                 logger.warning(f"  -> 识别到数字 '{text}'，但前面没有等待费用的卡牌名，忽略。")
 
-
-        # 处理最后一个可能没有匹配到费用的卡牌名
         if current_card_name:
-            logger.warning(f"  -> 最后一个卡牌 '{current_card_name}' 未找到匹配的费用，假设为0。")
-            # estimated_roi = current_card_coords if current_card_coords else (0,0,0,0) # <--- 移除 ROI
-            hand_cards.append({"name": current_card_name, "cost": 0, "index": card_index_counter}) # <--- 添加 index
+            logger.warning(f"  -> 最后一个卡牌 '{current_card_name}' 未找到匹配的OCR费用。")
+            cost = self._get_card_cost_from_knowledgebase(current_card_name)
+            hand_cards.append({"name": current_card_name, "cost": cost, "index": card_index_counter})
             card_index_counter += 1
 
         logger.info(f"  -> 手牌识别完成 (红框 OCR 法)，共 {len(hand_cards)} 张: {[(card['name'], card['cost']) for card in hand_cards]}")
         return hand_cards
+
 
     def _find_card_in_hand(self, card_name_to_find: str, hand_cards: List[Dict]) -> Optional[Dict]:
         """在手牌中查找卡牌 (模糊匹配) - 保持不变"""
@@ -300,15 +311,12 @@ class CombatState(GameState):
             return
 
         card_knowledge = self.context.game_knowledge.get('cards', {})
-        discard_options_with_desc = []
-        for idx, card in enumerate(discardable_cards):
-            card_name = card['name']
-            card_data = card_knowledge.get(card_name)
-            description = card_data.get('description', '无描述') if card_data else '未知卡牌'
-            discard_options_with_desc.append(f"{idx}:{card_name} ({description})")
+        prompt_card_options = []
+        for card_dict in discardable_cards:
+            prompt_card_options.append(card_dict) 
 
         # 在 Prompt 中包含索引，帮助 LLM 理解，但仍要求返回名称
-        available_cards_str_with_desc = ", ".join([f"{idx}:{card['name']}" for idx, card in enumerate(discard_options_with_desc)])
+        available_cards_str_with_desc = ", ".join([f"{idx}:{card['name']}" for idx, card in enumerate(prompt_card_options)])
         format_data = {
             "discard_count": discard_count,
             "available_cards": available_cards_str_with_desc,
@@ -560,6 +568,11 @@ class CombatState(GameState):
             time.sleep(1.5) # 等待胜利动画或结算
 
             self.context.add_to_history("map","system", "系统提示：战斗已胜利结束。")
+
+            if self.context:
+                self.context.increment_combat_wins()
+            else:
+                logger.warning("  -> 无法访问 GameContext，战斗胜利计数器未增加。")
 
             # 检查是否进入对话状态
             dialogue_text, _ = self.context.recognize_text_in_relative_roi(DIALOGUE_INDICATOR_ROI, "dialogue_check")
