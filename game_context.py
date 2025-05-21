@@ -12,6 +12,7 @@ from get_screen import ScreenCaptureManager
 from basic_data_reader import BasicDataReader
 from llm_client import LLMClient
 from game_state import GameState
+from ProcessCommunicator import ProcessCommunicator
 
 # 为了类型提示，避免循环导入
 if TYPE_CHECKING:
@@ -66,6 +67,9 @@ class GameContext:
         self._fetch_and_store_screen_dimensions()
         self.game_knowledge = self._load_knowledge(knowledge_file)
         self._load_prompts(prompt_file)
+        self.comm_client = ProcessCommunicator.instance(is_server=False, host='127.0.0.1', port=5000)
+        self.received_comm_messages: List[Dict[str, Any]] = [] # 新增：用于存储从 ProcessCommunicator 收到的消息
+        self._register_comm_handlers()
 
         logger.info(f"GameContext 初始化完成。初始状态: {type(initial_state).__name__}")
 
@@ -568,24 +572,76 @@ class GameContext:
         logger.info(f"  -> 成功处理 {len(processed_nodes)} 个节点。")
         return processed_nodes, roi_image
 
-    def handle_chat_message(self, chat_message: str):
+    def _register_comm_handlers(self):
+        """注册 ProcessCommunicator 的消息处理器。"""
+        if self.comm_client:
+            # 注册一个能处理所有主题消息的处理器
+            # "" 作为前缀会匹配所有消息
+            self.comm_client.add_handler("", self._handle_incoming_comm_message)
+            logger.info("已为 ProcessCommunicator 注册通用消息处理器。")
+        else:
+            logger.warning("ProcessCommunicator 客户端未初始化，无法注册处理器。")
+
+    def _handle_incoming_comm_message(self, msg: dict, topic: str):
         """
-        处理从 LLM 响应中提取的 <chat> 内容。
-        目前只是记录日志，将来可以扩展为显示、朗读等。
+        ProcessCommunicator 的回调处理器，用于接收和存储消息。
+        当 ProcessCommunicator 接收到消息时，此方法会被调用。
 
         Args:
-            chat_message: 从 <chat> 标签中提取的字符串内容。
+            msg (dict): 收到的原始消息体 (通常是 JSON 解码后的字典，
+                        格式为 ProcessCommunicator 发送时的 {"msg": ..., "topic": ...})。
+            topic (str): 消息的主题 (ProcessCommunicator 分发时使用的主题)。
         """
-        logger.info(f"主播消息: {chat_message}")
-        # 可以在这里添加其他处理逻辑，例如：
-        # - self.ui_handler.display_chat(chat_message)
-        # - self.tts_engine.speak(chat_message)
+        logger.debug(f"GameContext._handle_incoming_comm_message 收到消息: {msg} (主题: {topic})")
+        # 存储消息，可以根据需要调整存储的格式
+        # msg 参数本身就是 ProcessCommunicator 内部封装的 {"msg": original_content, "topic": original_topic}
+        self.received_comm_messages.append({"handler_topic": topic, "message_payload": msg})
+
+    def get_received_communication_messages(self, clear_after_read: bool = True) -> List[Dict[str, Any]]:
+        """
+        获取通过 ProcessCommunicator 接收到的所有累积消息。
+
+        Args:
+            clear_after_read (bool): 如果为 True (默认)，则在返回消息后清空内部存储的列表。
+                                     如果为 False，则消息会保留在列表中以供后续调用。
+
+        Returns:
+            List[Dict[str, Any]]: 包含接收到的消息的列表。
+                                  列表中的每个元素是一个字典，格式为:
+                                  {"handler_topic": "分发时的主题", 
+                                   "message_payload": {"msg": "原始消息内容", "topic": "原始消息主题"}}
+        """
+        # 创建消息列表的副本以供返回，避免外部修改影响内部列表
+        messages_to_return = list(self.received_comm_messages)
+
+        if clear_after_read:
+            self.received_comm_messages.clear()
+            logger.debug(f"已获取并清空 {len(messages_to_return)} 条 ProcessCommunicator 接收的消息。")
+        else:
+            logger.debug(f"已获取 {len(messages_to_return)} 条 ProcessCommunicator 接收的消息 (未清空)。")
+
+        return messages_to_return
+
+    def handle_thinking_message(self, thinking_message: str):
+        """
+        处理从 LLM 响应中提取的 <thinking> 内容。
+        该方法将消息内容发送到 ProcessCommunicator 的指定主题。
+
+        Args:
+            thinking_message: 从 <thinking> 标签中提取的字符串内容。
+        """
+        self.comm_client.active = True
+        message_content = thinking_message
+        topic = "GameContext.ThinkingMessage"
+        self.comm_client.send(message_content, topic)
+        logger.info(f"Thinking 消息已发送: {message_content} (主题: {topic})")
+        self.comm_client.active = False
 
     def ask_llm(self, prompt: str, history_type: Optional[str] = None) -> Optional[str]:
         """
         向 LLM 发送请求（带可选历史记录）并获取响应。
         自动将用户提示和 LLM 响应添加到指定的历史记录中。
-        解析 LLM 响应，将 <chat> 内容传递给 handle_chat_message 处理，
+        解析 LLM 响应，将 <thinking> 内容传递给 handle_thinking_message 处理，
         并仅返回 <choice> 标签内的内容。
 
         Args:
@@ -601,6 +657,13 @@ class GameContext:
             current_history = self.get_history(history_type)
             # logger.debug(f"  -> 使用 '{history_type}' 历史记录 (长度: {len(current_history)}) 进行 LLM 调用。")
 
+        # 组合当前的用户提示
+        user_message = self.get_received_communication_messages()
+        if user_message:
+            # 仅在有消息时添加到历史记录
+            for msg in user_message:
+                self.add_to_history(history_type, "user", msg["message_payload"]["msg"])
+
         # 调用 LLMClient 的 generate 方法，传递历史记录
         full_response = self.llm_client.generate(prompt, history=current_history)
 
@@ -610,9 +673,9 @@ class GameContext:
             self.add_to_history(history_type, "assistant", full_response) # 记录完整响应
 
         choice_content: Optional[str] = None
-        chat_content: Optional[str] = None
+        thinking_content: Optional[str] = None
 
-        # 解析响应以提取 <choice> 和 <chat> 内容
+        # 解析响应以提取 <choice> 和 <thinking> 内容
         if full_response:
             # 提取 <choice> 内容
             choice_match = re.search(r'<choice>(.*?)</choice>', full_response, re.DOTALL)
@@ -622,25 +685,26 @@ class GameContext:
             else:
                 logger.warning(f"  -> 未能在 LLM 响应中找到 <choice> 标签。")
 
-            # 提取 <chat> 内容
-            chat_match = re.search(r'<chat>(.*?)</chat>', full_response, re.DOTALL)
-            if chat_match:
-                chat_content = chat_match.group(1).strip()
-                # 调用新方法处理 chat 内容
-                self.handle_chat_message(chat_content)
+            # 提取 <thinking> 内容
+            thinking_match = re.search(r'<thinking>(.*?)</thinking>', full_response, re.DOTALL)
+            if thinking_match:
+                thinking_content = thinking_match.group(1).strip()
+                # 调用新方法处理 thinking 内容
+                self.handle_thinking_message(thinking_content)
             else:
-                # 如果需要，可以记录未找到 chat 标签的警告
-                logger.debug(f"  -> 未能在 LLM 响应中找到 <chat> 标签。") # 使用 debug 级别
+                # 如果需要，可以记录未找到 thinking 标签的警告
+                logger.debug(f"  -> 未能在 LLM 响应中找到 <thinking> 标签。") # 使用 debug 级别
 
-            # 检查是否至少提取到了 choice 或 chat，否则记录完整响应以供调试
-            if not choice_match and not chat_match:
-                 logger.warning(f"  -> LLM 响应中未找到 <choice> 或 <chat> 标签。完整响应: {full_response}")
+            # 检查是否至少提取到了 choice 或 thinking，否则记录完整响应以供调试
+            if not choice_match and not thinking_match:
+                 logger.warning(f"  -> LLM 响应中未找到 <choice> 或 <thinking> 标签。完整响应: {full_response}")
 
         else:
             logger.warning("  -> LLM 未返回响应。")
 
         # 返回提取到的 choice 内容 (可能是 None)
         return choice_content
+    
 
     def set_last_selected_node(self, node_info: Any):
         """

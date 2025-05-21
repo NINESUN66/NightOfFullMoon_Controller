@@ -45,7 +45,7 @@ class LLMClient:
             logger.warning("未提供 LLM_API_KEY 或在环境变量中未找到。LLM 客户端未初始化。")
 
 
-    def generate(self, prompt: str, history: Optional[List[Dict[str, str]]] = None, max_tokens: int = 150) -> Optional[str]:
+    def generate(self, prompt: str, history: Optional[List[Dict[str, str]]] = None, max_tokens: int = 500) -> Optional[str]:
         """
         向 LLM 发送提示（和历史记录）并获取生成的文本响应。
 
